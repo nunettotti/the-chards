@@ -39,6 +39,7 @@
     background:rgba(246,240,225,.12);border:1px solid rgba(246,240,225,.18);border-radius:10px;
     width:38px;height:38px;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);transition:background .15s,transform .1s;}
   .hbtn:active{transform:scale(.94);}
+  .hbtn.bgm-on{background:var(--stamp);border-color:transparent;}
   #tableName{flex:0 1 auto;min-width:40px;font-family:'Gowun Batang',serif;font-weight:700;font-size:18px;cursor:pointer;
     padding:6px 12px;border-radius:8px;max-width:46vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
     text-shadow:0 2px 6px rgba(0,0,0,.4);}
@@ -337,6 +338,7 @@
   <button class="hbtn" id="shakeBtn" title="흔들기 — 고정 안 된 랜덤 카드 전부 다시 뽑기">🎲</button>
   <button class="hbtn" id="exportBtn" title="테이블 내보내기 (AI 해석용)">📤</button>
   <button class="hbtn" id="soundBtn" title="소리">🔊</button>
+  <button class="hbtn" id="bgmBtn" title="BGM — 길게 눌러 설정">🎵</button>
 </header>
 
 <div id="stage"><div id="world"></div></div>
@@ -420,6 +422,7 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
       activeTable:'t1',
       usage:{}, recent:[], sound:true,
       customSounds:{},
+      bgm:{folder:'bgm/', files:[], volume:0.5},
       seq:{p:1, t:2, f:1, x:1}
     };
   }
@@ -460,6 +463,7 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
     if(!s.usage) s.usage={};
     if(!s.recent) s.recent=[];
     if(!s.customSounds) s.customSounds={};
+    if(!s.bgm) s.bgm={folder:'bgm/', files:[], volume:0.5};
     (s.tables||[]).forEach(t=>{ if(!t.updated) t.updated=Date.now(); });
     return s;
   }
@@ -1263,6 +1267,19 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
 
   /* ── 텍스트 오브제 ── */
   let selTextId=null, lastTextTap={id:null,t:0};
+  const _measureCanvas=document.createElement('canvas');
+  const _measureCtx=_measureCanvas.getContext('2d');
+  function measureTextWidth(text, px){
+    _measureCtx.font=px+'px "IBM Plex Sans KR", -apple-system, sans-serif';
+    const lines=(text!=='' && text!=null ? text : ' ').split('\n');
+    let max=0;
+    lines.forEach(line=>{ const w=_measureCtx.measureText(line===''?' ':line).width; if(w>max) max=w; });
+    return max;
+  }
+  function resizeTextEl(el, text, px){
+    const w=measureTextWidth(text, px);
+    el.style.width=Math.min(400, Math.max(30, Math.ceil(w)+18))+'px';
+  }
   function addText(w){
     const t=tbl(); if(!t.texts) t.texts=[];
     const x={tid:'x'+(S.seq.x++), text:'메모', x:w.x-30, y:w.y-14, size:18};
@@ -1282,6 +1299,7 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
     el.style.left=x.x+'px'; el.style.top=x.y+'px'; el.style.fontSize=x.size+'px';
     el.innerHTML='<div class="text-toolbar"><button class="tt-btn" data-a="minus">A−</button><button class="tt-btn" data-a="plus">A＋</button><button class="tt-btn" data-a="del">✕</button></div><span class="tx"></span>';
     const span=el.querySelector('.tx'); span.textContent=x.text;
+    resizeTextEl(el, x.text, x.size);
     el.querySelectorAll('.tt-btn').forEach(b=>{
       b.addEventListener('pointerdown',e=>e.stopPropagation());
       b.addEventListener('click',e=>{
@@ -1300,6 +1318,7 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
       touchTable(); renderTable(); persist();
     });
     span.addEventListener('keydown',e=>{ if(e.key==='Escape') span.blur(); });
+    span.addEventListener('input',()=>{ resizeTextEl(el, span.textContent, x.size); });
     let pid=null,sx=0,sy=0,ox=0,oy=0,moved=false;
     el.addEventListener('pointerdown',e=>{
       if(span.isContentEditable) { e.stopPropagation(); return; }
@@ -1579,6 +1598,90 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
     });
     $('expClose').addEventListener('click',closeModal);
   });
+
+  /* ═══════ BGM (배경음악) ═══════
+     S.bgm = {folder, files, volume} 만 저장한다 (재생중 여부는 저장하지 않음 — 새로고침 시 자동재생은
+     브라우저 정책상 막히므로, 매번 버튼을 눌러 재생을 시작해야 한다). mp3 실 파일은 서버(호스팅 폴더)에서
+     그때그때 불러오며, 이 앱 데이터(백업 등)에는 파일 용량이 실리지 않는다. */
+  let bgmPlaying=false, bgmQueue=[];
+  const bgmAudio=new Audio();
+  function bgmShuffle(arr){
+    const a=arr.slice();
+    for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const t=a[i]; a[i]=a[j]; a[j]=t; }
+    return a;
+  }
+  function bgmFilenames(){ return ((S.bgm&&S.bgm.files)||[]).map(s=>s.trim()).filter(Boolean); }
+  function bgmUrl(name){
+    const folder=((S.bgm&&S.bgm.folder)||'bgm/').trim() || 'bgm/';
+    const parts=folder.split('/').filter(Boolean).map(encodeURIComponent);
+    return (parts.length?parts.join('/')+'/':'') + encodeURIComponent(name);
+  }
+  function bgmNext(){
+    const files=bgmFilenames();
+    if(files.length===0){
+      toast('BGM 파일이 설정되지 않았습니다 — 🎵 길게 눌러 설정하세요');
+      bgmPlaying=false; renderBgmBtn(); return;
+    }
+    if(bgmQueue.length===0) bgmQueue=bgmShuffle(files);
+    const name=bgmQueue.shift();
+    bgmAudio.src=bgmUrl(name);
+    bgmAudio.volume=(S.bgm&&S.bgm.volume!=null)?S.bgm.volume:0.5;
+    bgmAudio.play().then(()=>{ toast('🎵 '+name); }).catch(()=>bgmSkip(name));
+  }
+  function bgmSkip(name){
+    toast('재생할 수 없습니다: '+name+' — 다음 곡으로 넘어갑니다');
+    setTimeout(()=>{ if(bgmPlaying) bgmNext(); }, 400);
+  }
+  bgmAudio.addEventListener('ended', ()=>{ if(bgmPlaying) bgmNext(); });
+  bgmAudio.addEventListener('error', ()=>{
+    if(!bgmPlaying) return;
+    let n=''; try{ n=decodeURIComponent(bgmAudio.src.split('/').pop()||''); }catch(e){}
+    bgmSkip(n);
+  });
+  function renderBgmBtn(){ $('bgmBtn').classList.toggle('bgm-on', bgmPlaying); }
+  $('bgmBtn').addEventListener('click', ()=>{
+    bgmPlaying=!bgmPlaying;
+    renderBgmBtn();
+    if(bgmPlaying) bgmNext(); else bgmAudio.pause();
+  });
+  let bgmBtnLp=null;
+  $('bgmBtn').addEventListener('contextmenu', e=>{ e.preventDefault(); openBgmSettings(); });
+  $('bgmBtn').addEventListener('pointerdown', ()=>{ bgmBtnLp=setTimeout(openBgmSettings,600); });
+  $('bgmBtn').addEventListener('pointerup', ()=>clearTimeout(bgmBtnLp));
+  $('bgmBtn').addEventListener('pointerleave', ()=>clearTimeout(bgmBtnLp));
+
+  function openBgmSettings(){
+    clearTimeout(bgmBtnLp);
+    if(!S.bgm) S.bgm={folder:'bgm/', files:[], volume:0.5};
+    const b=S.bgm;
+    openModalHtml(
+      '<h2>BGM 설정</h2>'+
+      '<div style="font-size:11.5px;color:var(--ink-soft);margin-bottom:10px;line-height:1.6;">이 앱을 올려둔 곳(예: 깃허브 저장소)에 "bgm" 같은 폴더를 만들고 mp3를 올려두세요. 아래에 그 폴더명과 파일명을 한 줄씩 적으면, 켤 때마다 이 목록에서 임의 순서로 재생됩니다.</div>'+
+      '<div class="field"><label>폴더 경로</label><input id="bgmFolder" placeholder="bgm/"></div>'+
+      '<div class="field"><label>파일명 목록 (한 줄에 하나씩)</label><textarea id="bgmFiles" style="width:100%;height:130px;font-family:inherit;font-size:13px;color:var(--ink);background:#fff;border:1.5px solid var(--line);border-radius:10px;padding:10px;outline:none;resize:vertical;" placeholder="song1.mp3&#10;song2.mp3"></textarea></div>'+
+      '<div class="field"><label>볼륨</label><input id="bgmVol" type="range" min="0" max="1" step="0.05" style="width:100%;"></div>'+
+      '<div class="row"><button class="m-btn ghost" id="bgmTest">저장하고 미리듣기</button><button class="m-btn save" id="bgmSave">저장</button></div>');
+    $('bgmFolder').value=b.folder||'bgm/';
+    $('bgmFiles').value=(b.files||[]).join('\n');
+    $('bgmVol').value=(b.volume!=null?b.volume:0.5);
+    function readForm(){
+      S.bgm.folder=$('bgmFolder').value.trim()||'bgm/';
+      S.bgm.files=$('bgmFiles').value.split('\n').map(s=>s.trim()).filter(Boolean);
+      S.bgm.volume=parseFloat($('bgmVol').value);
+      bgmQueue=[];
+      scheduleSave();
+    }
+    $('bgmTest').addEventListener('click',()=>{
+      readForm();
+      bgmPlaying=true; renderBgmBtn(); bgmNext();
+      closeModal();
+    });
+    $('bgmSave').addEventListener('click',()=>{
+      readForm();
+      closeModal();
+      toast('BGM 설정을 저장했습니다');
+    });
+  }
 
   /* ═══════ 소리 토글 ═══════ */
   function renderSound(){ $('soundBtn').textContent=S.sound?'🔊':'🔇'; }
