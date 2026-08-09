@@ -299,13 +299,17 @@
 
   /* ── 카드 피커 그룹행 ── */
   .pick-group{display:flex;align-items:center;gap:8px;width:100%;border:none;background:none;cursor:pointer;
-    font-family:inherit;font-size:13px;color:var(--ink);padding:9px 6px;border-radius:8px;text-align:left;font-weight:500;}
-  .pick-group:hover{background:rgba(46,42,36,.07);}
+    font-family:inherit;font-size:13px;color:var(--ink);padding:9px 6px;border-radius:8px;text-align:left;font-weight:500;}  .pick-group:hover{background:rgba(46,42,36,.07);}
   .pick-group .arrow{font-size:10px;color:var(--ink-soft);width:12px;flex:none;transition:transform .15s;}
   .pick-group.open .arrow{transform:rotate(90deg);}
   .pick-group .gname{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .pick-group .gcnt{font-size:11px;color:var(--ink-soft);flex:none;}
   .pick-indent{margin-left:14px;border-left:1px solid var(--line);padding-left:4px;}
+  .pk-add-btn{display:flex;align-items:center;gap:8px;width:100%;border:1.5px dashed var(--stamp);
+    background:rgba(179,67,43,.06);cursor:pointer;font-family:inherit;font-size:13.5px;font-weight:700;
+    color:var(--stamp);padding:11px 12px;border-radius:10px;text-align:left;margin-bottom:10px;}
+  .pk-add-btn:hover{background:rgba(179,67,43,.12);}
+  .pk-add-btn .plus-ic{font-size:16px;line-height:1;}
 
   /* ── 사운드 설정 ── */
   .snd-row{display:flex;align-items:center;gap:10px;padding:11px 4px;border-bottom:1px solid var(--line);}
@@ -433,6 +437,7 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
       usage:{}, recent:[], sound:true,
       customSounds:{},
       bgm:{folder:'bgm/', files:[], volume:0.5},
+      tomb:{c:{}, t:{}},
       seq:{p:1, t:2, f:1, x:1}
     };
   }
@@ -474,10 +479,15 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
     if(!s.recent) s.recent=[];
     if(!s.customSounds) s.customSounds={};
     if(!s.bgm) s.bgm={folder:'bgm/', files:[], volume:0.5};
+    if(!s.tomb) s.tomb={c:{}, t:{}};
+    if(!s.tomb.c) s.tomb.c={};
+    if(!s.tomb.t) s.tomb.t={};
+    (s.cards||[]).forEach(c=>{ if(c.mtime===undefined) c.mtime=0; });
     (s.tables||[]).forEach(t=>{ if(!t.updated) t.updated=Date.now(); });
     return s;
   }
   function touchTable(){ const t=tbl(); if(t) t.updated=Date.now(); renderTableMeta(); }
+  function touchCard(c){ if(c) c.mtime=Date.now(); }
   function scheduleSave(){ clearTimeout(saveTimer); saveTimer=setTimeout(persist,500); }
   function fmtDateTime(ms){
     if(!ms) return '';
@@ -543,6 +553,80 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
     delete o.customSounds;
     return JSON.stringify(o);
   }
+  /* 항목별 병합 — 카드는 카드의 mtime, 테이블은 테이블의 updated로 각각 최신 것을 고른다.
+     삭제는 묘비(tomb)에 시각을 남겨, 다른 기기의 옛 사본이 되살아나지 않게 한다. */
+  function mergeTomb(a,b){
+    const out=Object.assign({}, a||{});
+    Object.keys(b||{}).forEach(k=>{ if(!out[k] || b[k]>out[k]) out[k]=b[k]; });
+    return out;
+  }
+  function mergeStates(L,R){
+    const out=Object.assign({}, L);
+    const tomb={ c:mergeTomb(L.tomb&&L.tomb.c, R.tomb&&R.tomb.c), t:mergeTomb(L.tomb&&L.tomb.t, R.tomb&&R.tomb.t) };
+    out.tomb=tomb;
+
+    // 카드
+    const cm={};
+    (L.cards||[]).forEach(c=>{ cm[c.id]=c; });
+    (R.cards||[]).forEach(c=>{
+      const cur=cm[c.id];
+      if(!cur || (c.mtime||0)>(cur.mtime||0)) cm[c.id]=c;
+    });
+    out.cards=Object.keys(cm).map(k=>cm[k])
+      .filter(c=> !(tomb.c[c.id] && tomb.c[c.id] > (c.mtime||0)))
+      .sort((a,b)=>a.id<b.id?-1:(a.id>b.id?1:0));
+
+    // 테이블
+    const tm={};
+    (L.tables||[]).forEach(t=>{ tm[t.id]=t; });
+    (R.tables||[]).forEach(t=>{
+      const cur=tm[t.id];
+      if(!cur || (t.updated||0)>(cur.updated||0)) tm[t.id]=t;
+    });
+    out.tables=Object.keys(tm).map(k=>tm[k])
+      .filter(t=> !(tomb.t[t.id] && tomb.t[t.id] > (t.updated||0)));
+    if(out.tables.length===0) out.tables=[{id:'t1',name:'테이블 1',pan:{x:0,y:0},zoom:1,placements:[],fields:[],texts:[],updated:Date.now()}];
+    if(!out.tables.some(t=>t.id===out.activeTable)) out.activeTable=out.tables[0].id;
+
+    // 그룹 — 합집합
+    const gs=(L.groups||[]).slice();
+    (R.groups||[]).forEach(g=>{ if(gs.indexOf(g)<0) gs.push(g); });
+    out.groups=gs;
+
+    // 사용 이력 — 합집합
+    const us=Object.assign({}, L.usage||{});
+    Object.keys(R.usage||{}).forEach(k=>{
+      const a=us[k]||[], b=R.usage[k]||[];
+      const s=a.slice();
+      b.forEach(v=>{ if(s.indexOf(v)<0) s.push(v); });
+      us[k]=s;
+    });
+    out.usage=us;
+
+    // 최근 사용 — 합쳐서 중복 제거
+    const rc=[]; (L.recent||[]).concat(R.recent||[]).forEach(id=>{ if(rc.indexOf(id)<0) rc.push(id); });
+    out.recent=rc.slice(0,7);
+
+    // 일련번호 — 각각 최댓값
+    const ls=L.seq||{}, rs=R.seq||{};
+    out.seq={};
+    ['p','t','f','x'].forEach(k=>{ out.seq[k]=Math.max(ls[k]||1, rs[k]||1); });
+
+    // 설정류 — 더 최근에 저장된 쪽
+    const newer = (R.updatedAt||0) > (L.updatedAt||0) ? R : L;
+    out.bgm=newer.bgm||L.bgm; out.sound=newer.sound!==undefined?newer.sound:L.sound;
+    out.updatedAt=Math.max(L.updatedAt||0, R.updatedAt||0);
+    return out;
+  }
+  function adoptMerged(remoteObj){
+    const keepSounds = S && S.customSounds ? S.customSounds : {};
+    const before = JSON.stringify({c:S.cards, t:S.tables, g:S.groups});
+    const merged = migrate(mergeStates(S, migrate(remoteObj)));
+    merged.customSounds = keepSounds;
+    S = merged;
+    const after = JSON.stringify({c:S.cards, t:S.tables, g:S.groups});
+    return before !== after;   // 실제로 바뀐 게 있는지
+  }
   function adoptRemote(remoteObj){
     const keepSounds=S && S.customSounds ? S.customSounds : {};
     S=migrate(remoteObj);
@@ -566,6 +650,18 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
     if(r.status===403) msg+=' (토큰 권한 부족 — Contents: Read and write 확인)';
     if(r.status===404) msg+=' (저장소 이름/소유자 확인)';
     return msg;
+  }
+  // 올리기 전에 원격을 먼저 읽어 병합한다 (다른 기기 수정분을 덮어쓰지 않도록)
+  async function ghPushMerged(){
+    let remote=null;
+    try{ remote=await ghFetchRemote(); }catch(e){ throw e; }
+    if(remote){
+      const changed=adoptMerged(remote);
+      S.updatedAt=Date.now();
+      await storeSet(KEY, JSON.stringify(S));
+      if(changed){ renderTable(); renderSidebar(); }
+    }
+    await ghPush();
   }
   async function ghPush(){
     const body={
@@ -603,7 +699,7 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
     syncBusy=true; renderSyncBtn();
     syncDirty=false;                                     // 이 시점 내용을 올린다
     try{
-      await ghPush();
+      await ghPushMerged();
       syncErr=''; syncFails=0;
       syncLastPushAt=Date.now();
     }catch(e){
@@ -628,15 +724,10 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
     try{
       const remote=await ghFetchRemote();
       if(remote){
-        const rT=remote.updatedAt||0, lT=(S&&S.updatedAt)||0;
-        const localEmpty = !S || !S.tables || S.tables.every(t=>(t.placements||[]).length===0 && (t.fields||[]).length===0);
-        if(rT>lT || localEmpty){
-          adoptRemote(remote);
-          await storeSet(KEY, JSON.stringify(S));
-          toast('클라우드에서 최신 데이터를 불러왔습니다');
-        } else if(lT>rT){
-          await ghPush();
-        }
+        const changed=adoptMerged(remote);
+        await storeSet(KEY, JSON.stringify(S));
+        if(changed) toast('클라우드의 최신 내용을 반영했습니다');
+        await ghPush();
       } else {
         await ghPush(); // 최초 1회 업로드
         toast('클라우드에 첫 저장을 완료했습니다');
@@ -667,17 +758,10 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
       if(!syncOn()){ openSyncSettings(); return; }
       syncBusy=true; syncErr=''; renderSyncBtn();
       try{
-        const remote=await ghFetchRemote();
-        if(remote && (remote.updatedAt||0) > ((S&&S.updatedAt)||0)){
-          adoptRemote(remote);
-          await storeSet(KEY, JSON.stringify(S));
-          renderTable(); renderSidebar();
-          toast('클라우드의 최신 내용을 받아왔습니다');
-        } else {
-          await ghPush();
-          toast('클라우드에 저장했습니다');
-        }
-        syncLastAt=Date.now();
+        await ghPushMerged();
+        renderTable(); renderSidebar();
+        syncLastAt=Date.now(); syncDirty=false;
+        toast('동기화 완료');
       }catch(e){ syncErr=String(e.message||e); toast('동기화 실패 — '+syncErr); }
       syncBusy=false; renderSyncBtn();
     });
@@ -1140,6 +1224,8 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
       row.addEventListener('click',e=>{
         if(e.target.classList.contains('del')){
           if(confirm('['+t.name+'] 테이블을 삭제할까요? 위에 놓인 카드 배치도 사라집니다. (카드 자체는 보관소에 남습니다)')){
+            if(!S.tomb) S.tomb={c:{},t:{}};
+            S.tomb.t[t.id]=Date.now();
             S.tables=S.tables.filter(x=>x.id!==t.id);
             if(S.activeTable===t.id) S.activeTable=S.tables[0].id;
             renderTable(); renderSidebar(); scheduleSave();
@@ -1274,6 +1360,7 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
     c.actual=$('pgActual').value.trim();
     c.content=$('pgContent').value;
     c.updated=today();
+    touchCard(c);
     touchRecent(c.id);
     renderTable(); renderSidebar(); persist();
     toast('저장됨'); closePage();
@@ -1286,6 +1373,8 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
   $('pgDelete').addEventListener('click',()=>{
     const c=card(pageCardId); if(!c) return;
     if(!confirm('['+(c.title||c.id)+'] 카드를 완전히 파기할까요? 모든 테이블에서도 사라집니다.')) return;
+    if(!S.tomb) S.tomb={c:{},t:{}};
+    S.tomb.c[pageCardId]=Date.now();
     S.cards=S.cards.filter(x=>x.id!==pageCardId);
     S.tables.forEach(t=>{ t.placements=t.placements.filter(p=>p.cardId!==pageCardId); });
     delete S.usage[pageCardId];
@@ -1319,7 +1408,7 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
     $('ncOk').addEventListener('click',()=>{
       const g=$('ncGroup').value, title=$('ncTitle').value.trim();
       if(!title){ $('ncTitle').focus(); return; }
-      const c={id:nextCardId(g), title, group:g, content:'', est:'', actual:'', updated:today()};
+      const c={id:nextCardId(g), title, group:g, content:'', est:'', actual:'', updated:today(), mtime:Date.now()};
       S.cards.push(c); touchRecent(c.id);
       closeModal(); renderSidebar(); persist();
       openCardPage(c.id);
@@ -1398,8 +1487,8 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
             actual:ix['실측 소요시간']>=0?(row[ix['실측 소요시간']]||'').trim():''
           };
           const c=card(cid);
-          if(c){ c.title=rec.title||c.title; if(rec.group)c.group=rec.group; c.est=rec.est; c.actual=rec.actual; up++; }
-          else { S.cards.push({id:cid, title:rec.title, group:rec.group||S.groups[S.groups.length-1], content:'', est:rec.est, actual:rec.actual, updated:today()}); add++; }
+          if(c){ c.title=rec.title||c.title; if(rec.group)c.group=rec.group; c.est=rec.est; c.actual=rec.actual; touchCard(c); up++; }
+          else { S.cards.push({id:cid, title:rec.title, group:rec.group||S.groups[S.groups.length-1], content:'', est:rec.est, actual:rec.actual, updated:today(), mtime:Date.now()}); add++; }
           if(rec.group && !S.groups.includes(rec.group)) S.groups.push(rec.group);
         });
         renderTable(); renderSidebar(); persist();
@@ -1733,8 +1822,10 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
   function openCardPicker(w){
     openModalHtml(
       '<h2>카드 올리기</h2>'+
+      '<button class="pk-add-btn" id="pkAddNew"><span class="plus-ic">＋</span>새 카드 만들기</button>'+
       '<input id="pkSearch" placeholder="카드 검색 (제목 · ID)" autocomplete="off">'+
       '<div class="pick-list" id="pkList"></div>');
+    $('pkAddNew').addEventListener('click',()=>openCardPickerNewForm(w));
     const listEl=$('pkList');
     function place(c){ closeModal(); placeCard(c.id, w.x+cardDims().w/2, w.y+cardDims().h/2); }
     function cardBtn(c){
@@ -1773,6 +1864,27 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
     $('pkSearch').addEventListener('input',renderList);
     renderList();
     setTimeout(()=>$('pkSearch').focus(),50);
+  }
+
+  function openCardPickerNewForm(w){
+    let opts=''; S.groups.forEach(g=>{ opts+='<option value="'+esc(g)+'">'+esc(g)+'</option>'; });
+    openModalHtml(
+      '<h2>새 카드</h2>'+
+      '<div class="field"><label>그룹</label><select id="ncGroup">'+opts+'</select></div>'+
+      '<div class="field"><label>카드 제목</label><input id="ncTitle" maxlength="80" placeholder="예: 보조배터리"></div>'+
+      '<div class="row"><button class="m-btn ghost" id="ncBack">← 목록으로</button><button class="m-btn save" id="ncOk">만들고 올리기</button></div>');
+    setTimeout(()=>$('ncTitle').focus(),50);
+    $('ncBack').addEventListener('click',()=>openCardPicker(w));
+    $('ncTitle').addEventListener('keydown',e=>{ if(e.key==='Enter') $('ncOk').click(); });
+    $('ncOk').addEventListener('click',()=>{
+      const g=$('ncGroup').value, title=$('ncTitle').value.trim();
+      if(!title){ $('ncTitle').focus(); return; }
+      const c={id:nextCardId(g), title, group:g, content:'', est:'', actual:'', updated:today(), mtime:Date.now()};
+      S.cards.push(c);
+      renderSidebar(); persist();
+      closeModal();
+      placeCard(c.id, w.x+cardDims().w/2, w.y+cardDims().h/2);
+    });
   }
 
   /* ── 테이블 익스포트 (AI 해석용) ── */
@@ -2048,11 +2160,13 @@ const DEFAULT_DB = {"cards": [{"id": "AD-001", "title": "브랜디드", "group":
     syncPulling=true;
     try{
       const remote=await ghFetchRemote();
-      if(remote && (remote.updatedAt||0) > ((S&&S.updatedAt)||0)){
-        adoptRemote(remote);
-        await storeSet(KEY, JSON.stringify(S));
-        renderTable(); renderSidebar();
-        toast('다른 기기의 최신 내용을 받아왔습니다');
+      if(remote){
+        const changed=adoptMerged(remote);
+        if(changed){
+          await storeSet(KEY, JSON.stringify(S));
+          renderTable(); renderSidebar();
+          toast('다른 기기의 최신 내용을 받아왔습니다');
+        }
       }
       syncLastAt=Date.now(); syncErr='';
     }catch(e){ /* 조용히 무시 — 버튼 상태로만 표시 */ }
